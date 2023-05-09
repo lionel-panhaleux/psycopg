@@ -9,6 +9,7 @@ from random import random
 from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 from psycopg import errors as e
+from psycopg.rows import RowFactory
 
 from .errors import PoolClosed
 from ._compat import Counter, Deque
@@ -45,6 +46,7 @@ class BasePool:
         conninfo: str = "",
         *,
         kwargs: Optional[Dict[str, Any]],
+        row_factory: Optional[RowFactory[Any]],
         min_size: int,
         max_size: Optional[int],
         open: bool,
@@ -67,6 +69,12 @@ class BasePool:
 
         self.conninfo = conninfo
         self.kwargs: Dict[str, Any] = kwargs or {}
+        if row_factory:
+            if "row_factory" in self.kwargs:
+                raise ValueError(
+                    "kwargs['row_factory'] is incompatible with 'row_factory' argument"
+                )
+            self.kwargs["row_factory"] = row_factory
         self.name = name
         self._min_size = min_size
         self._max_size = max_size

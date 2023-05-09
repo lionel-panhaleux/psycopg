@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from psycopg import errors as e
 from psycopg import AsyncConnection
 from psycopg.pq import TransactionStatus
-from psycopg.rows import TupleRow
+from psycopg.rows import Row, RowFactory, TupleRow
 
 from .base import ConnectionAttempt, BasePool
 from .sched import AsyncScheduler
@@ -35,12 +35,13 @@ AsyncConnectFailedCB: TypeAlias = Union[
 ACT = TypeVar("ACT", bound="AsyncConnection[Any]")
 
 
-class AsyncConnectionPool(Generic[ACT], BasePool):
+class AsyncConnectionPool(Generic[ACT, Row], BasePool):
+    _Self = TypeVar("_Self", bound="AsyncConnectionPool[ACT, Row]")
     _pool: Deque[ACT]
 
     @overload
     def __init__(
-        self: "AsyncConnectionPool[AsyncConnection[TupleRow]]",
+        self: "AsyncConnectionPool[AsyncConnection[TupleRow], TupleRow]",
         conninfo: str = "",
         *,
         open: bool = ...,
@@ -62,7 +63,30 @@ class AsyncConnectionPool(Generic[ACT], BasePool):
 
     @overload
     def __init__(
-        self: "AsyncConnectionPool[ACT]",
+        self: "AsyncConnectionPool[AsyncConnection[Row], Row]",
+        conninfo: str = "",
+        *,
+        open: bool = ...,
+        configure: Optional[Callable[[ACT], Awaitable[None]]] = ...,
+        reset: Optional[Callable[[ACT], Awaitable[None]]] = ...,
+        kwargs: Optional[Dict[str, Any]] = ...,
+        row_factory: RowFactory[Row],
+        min_size: int = ...,
+        max_size: Optional[int] = ...,
+        name: Optional[str] = ...,
+        timeout: float = ...,
+        max_waiting: int = ...,
+        max_lifetime: float = ...,
+        max_idle: float = ...,
+        reconnect_timeout: float = ...,
+        reconnect_failed: Optional[AsyncConnectFailedCB] = ...,
+        num_workers: int = ...,
+    ):
+        ...
+
+    @overload
+    def __init__(
+        self: "AsyncConnectionPool[ACT, TupleRow]",
         conninfo: str = "",
         *,
         open: bool = ...,
@@ -70,6 +94,30 @@ class AsyncConnectionPool(Generic[ACT], BasePool):
         configure: Optional[Callable[[ACT], Awaitable[None]]] = ...,
         reset: Optional[Callable[[ACT], Awaitable[None]]] = ...,
         kwargs: Optional[Dict[str, Any]] = ...,
+        min_size: int = ...,
+        max_size: Optional[int] = ...,
+        name: Optional[str] = ...,
+        timeout: float = ...,
+        max_waiting: int = ...,
+        max_lifetime: float = ...,
+        max_idle: float = ...,
+        reconnect_timeout: float = ...,
+        reconnect_failed: Optional[AsyncConnectFailedCB] = ...,
+        num_workers: int = ...,
+    ):
+        ...
+
+    @overload
+    def __init__(
+        self: "AsyncConnectionPool[ACT, Row]",
+        conninfo: str = "",
+        *,
+        open: bool = ...,
+        connection_class: Type[ACT],
+        configure: Optional[Callable[[ACT], Awaitable[None]]] = ...,
+        reset: Optional[Callable[[ACT], Awaitable[None]]] = ...,
+        kwargs: Optional[Dict[str, Any]] = ...,
+        row_factory: RowFactory[Row],
         min_size: int = ...,
         max_size: Optional[int] = ...,
         name: Optional[str] = ...,
@@ -92,6 +140,7 @@ class AsyncConnectionPool(Generic[ACT], BasePool):
         configure: Optional[Callable[[ACT], Awaitable[None]]] = None,
         reset: Optional[Callable[[ACT], Awaitable[None]]] = None,
         kwargs: Optional[Dict[str, Any]] = None,
+        row_factory: Optional[RowFactory[Row]] = None,
         min_size: int = 4,
         max_size: Optional[int] = None,
         name: Optional[str] = None,
@@ -126,6 +175,7 @@ class AsyncConnectionPool(Generic[ACT], BasePool):
         super().__init__(
             conninfo,
             kwargs=kwargs,
+            row_factory=row_factory,
             min_size=min_size,
             max_size=max_size,
             open=open,
@@ -379,7 +429,7 @@ class AsyncConnectionPool(Generic[ACT], BasePool):
                 timeout,
             )
 
-    async def __aenter__(self) -> "AsyncConnectionPool[ACT]":
+    async def __aenter__(self: _Self) -> _Self:
         await self.open()
         return self
 
@@ -758,7 +808,7 @@ class AsyncClient(Generic[ACT]):
 class MaintenanceTask(ABC):
     """A task to run asynchronously to maintain the pool state."""
 
-    def __init__(self, pool: "AsyncConnectionPool[Any]"):
+    def __init__(self, pool: "AsyncConnectionPool[Any, Any]"):
         self.pool = ref(pool)
 
     def __repr__(self) -> str:
@@ -795,21 +845,21 @@ class MaintenanceTask(ABC):
         pool.run_task(self)
 
     @abstractmethod
-    async def _run(self, pool: "AsyncConnectionPool[Any]") -> None:
+    async def _run(self, pool: "AsyncConnectionPool[Any, Any]") -> None:
         ...
 
 
 class StopWorker(MaintenanceTask):
     """Signal the maintenance worker to terminate."""
 
-    async def _run(self, pool: "AsyncConnectionPool[Any]") -> None:
+    async def _run(self, pool: "AsyncConnectionPool[Any, Any]") -> None:
         pass
 
 
 class AddConnection(MaintenanceTask):
     def __init__(
         self,
-        pool: "AsyncConnectionPool[Any]",
+        pool: "AsyncConnectionPool[Any, Any]",
         attempt: Optional["ConnectionAttempt"] = None,
         growing: bool = False,
     ):
@@ -817,18 +867,18 @@ class AddConnection(MaintenanceTask):
         self.attempt = attempt
         self.growing = growing
 
-    async def _run(self, pool: "AsyncConnectionPool[Any]") -> None:
+    async def _run(self, pool: "AsyncConnectionPool[Any, Any]") -> None:
         await pool._add_connection(self.attempt, growing=self.growing)
 
 
 class ReturnConnection(MaintenanceTask):
     """Clean up and return a connection to the pool."""
 
-    def __init__(self, pool: "AsyncConnectionPool[Any]", conn: ACT):
+    def __init__(self, pool: "AsyncConnectionPool[Any, Any]", conn: ACT):
         super().__init__(pool)
         self.conn = conn
 
-    async def _run(self, pool: "AsyncConnectionPool[Any]") -> None:
+    async def _run(self, pool: "AsyncConnectionPool[Any, Any]") -> None:
         await pool._return_connection(self.conn)
 
 
@@ -839,7 +889,7 @@ class ShrinkPool(MaintenanceTask):
     in the pool.
     """
 
-    async def _run(self, pool: "AsyncConnectionPool[Any]") -> None:
+    async def _run(self, pool: "AsyncConnectionPool[Any, Any]") -> None:
         # Reschedule the task now so that in case of any error we don't lose
         # the periodic run.
         await pool.schedule_task(self, pool.max_idle)
@@ -855,7 +905,7 @@ class Schedule(MaintenanceTask):
 
     def __init__(
         self,
-        pool: "AsyncConnectionPool[Any]",
+        pool: "AsyncConnectionPool[Any, Any]",
         task: MaintenanceTask,
         delay: float,
     ):
@@ -863,5 +913,5 @@ class Schedule(MaintenanceTask):
         self.task = task
         self.delay = delay
 
-    async def _run(self, pool: "AsyncConnectionPool[Any]") -> None:
+    async def _run(self, pool: "AsyncConnectionPool[Any, Any]") -> None:
         await pool.schedule_task(self.task, self.delay)

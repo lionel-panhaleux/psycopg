@@ -10,7 +10,7 @@ from typing import Any, Callable, cast, Dict, Optional, overload, Tuple, Type
 
 from psycopg import Connection
 from psycopg.pq import TransactionStatus
-from psycopg.rows import TupleRow
+from psycopg.rows import Row, RowFactory, TupleRow
 
 from .pool import ConnectionPool, CT, AddConnection, ConnectFailedCB
 from .errors import PoolTimeout, TooManyRequests
@@ -41,10 +41,10 @@ class _BaseNullConnectionPool:
         pass
 
 
-class NullConnectionPool(_BaseNullConnectionPool, ConnectionPool[CT]):
+class NullConnectionPool(_BaseNullConnectionPool, ConnectionPool[CT, Row]):
     @overload
     def __init__(
-        self: "NullConnectionPool[Connection[TupleRow]]",
+        self: "NullConnectionPool[Connection[TupleRow], TupleRow]",
         conninfo: str = "",
         *,
         open: bool = ...,
@@ -66,14 +66,61 @@ class NullConnectionPool(_BaseNullConnectionPool, ConnectionPool[CT]):
 
     @overload
     def __init__(
-        self: "NullConnectionPool[CT]",
+        self: "NullConnectionPool[Connection[Row], Row]",
         conninfo: str = "",
         *,
         open: bool = ...,
-        connection_class: Type[CT] = ...,
         configure: Optional[Callable[[CT], None]] = ...,
         reset: Optional[Callable[[CT], None]] = ...,
         kwargs: Optional[Dict[str, Any]] = ...,
+        row_factory: RowFactory[Row],
+        min_size: int = ...,
+        max_size: Optional[int] = ...,
+        name: Optional[str] = ...,
+        timeout: float = ...,
+        max_waiting: int = ...,
+        max_lifetime: float = ...,
+        max_idle: float = ...,
+        reconnect_timeout: float = ...,
+        reconnect_failed: Optional[ConnectFailedCB] = ...,
+        num_workers: int = ...,
+    ):
+        ...
+
+    @overload
+    def __init__(
+        self: "NullConnectionPool[CT, TupleRow]",
+        conninfo: str = "",
+        *,
+        open: bool = ...,
+        connection_class: Type[CT],
+        configure: Optional[Callable[[CT], None]] = ...,
+        reset: Optional[Callable[[CT], None]] = ...,
+        kwargs: Optional[Dict[str, Any]] = ...,
+        min_size: int = ...,
+        max_size: Optional[int] = ...,
+        name: Optional[str] = ...,
+        timeout: float = ...,
+        max_waiting: int = ...,
+        max_lifetime: float = ...,
+        max_idle: float = ...,
+        reconnect_timeout: float = ...,
+        reconnect_failed: Optional[ConnectFailedCB] = ...,
+        num_workers: int = ...,
+    ):
+        ...
+
+    @overload
+    def __init__(
+        self: "NullConnectionPool[CT, Row]",
+        conninfo: str = "",
+        *,
+        open: bool = ...,
+        connection_class: Type[CT],
+        configure: Optional[Callable[[CT], None]] = ...,
+        reset: Optional[Callable[[CT], None]] = ...,
+        kwargs: Optional[Dict[str, Any]] = ...,
+        row_factory: RowFactory[Row],
         min_size: int = ...,
         max_size: Optional[int] = ...,
         name: Optional[str] = ...,
@@ -96,6 +143,7 @@ class NullConnectionPool(_BaseNullConnectionPool, ConnectionPool[CT]):
         configure: Optional[Callable[[CT], None]] = None,
         reset: Optional[Callable[[CT], None]] = None,
         kwargs: Optional[Dict[str, Any]] = None,
+        row_factory: Optional[RowFactory[Row]] = None,
         # Note: default value changed to 0.
         min_size: int = 0,
         max_size: Optional[int] = None,
@@ -115,6 +163,8 @@ class NullConnectionPool(_BaseNullConnectionPool, ConnectionPool[CT]):
             configure=configure,
             reset=reset,
             kwargs=kwargs,
+            # TODO: mypy bug? It says that the base class is expecting a RowFactory
+            row_factory=cast(RowFactory[Row], row_factory),
             min_size=min_size,
             max_size=max_size,
             name=name,

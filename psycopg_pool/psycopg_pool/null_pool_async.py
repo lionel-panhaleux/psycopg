@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, cast, Dict, Optional, overload, Typ
 
 from psycopg import AsyncConnection
 from psycopg.pq import TransactionStatus
-from psycopg.rows import TupleRow
+from psycopg.rows import Row, RowFactory, TupleRow
 
 from .errors import PoolTimeout, TooManyRequests
 from ._compat import ConnectionTimeout
@@ -20,10 +20,10 @@ from .pool_async import AsyncConnectionPool, ACT, AddConnection, AsyncConnectFai
 logger = logging.getLogger("psycopg.pool")
 
 
-class AsyncNullConnectionPool(_BaseNullConnectionPool, AsyncConnectionPool[ACT]):
+class AsyncNullConnectionPool(_BaseNullConnectionPool, AsyncConnectionPool[ACT, Row]):
     @overload
     def __init__(
-        self: "AsyncNullConnectionPool[AsyncConnection[TupleRow]]",
+        self: "AsyncNullConnectionPool[AsyncConnection[TupleRow], TupleRow]",
         conninfo: str = "",
         *,
         open: bool = ...,
@@ -45,7 +45,30 @@ class AsyncNullConnectionPool(_BaseNullConnectionPool, AsyncConnectionPool[ACT])
 
     @overload
     def __init__(
-        self: "AsyncNullConnectionPool[ACT]",
+        self: "AsyncNullConnectionPool[AsyncConnection[Row], Row]",
+        conninfo: str = "",
+        *,
+        open: bool = ...,
+        configure: Optional[Callable[[ACT], Awaitable[None]]] = ...,
+        reset: Optional[Callable[[ACT], Awaitable[None]]] = ...,
+        kwargs: Optional[Dict[str, Any]] = ...,
+        row_factory: RowFactory[Row],
+        min_size: int = ...,
+        max_size: Optional[int] = ...,
+        name: Optional[str] = ...,
+        timeout: float = ...,
+        max_waiting: int = ...,
+        max_lifetime: float = ...,
+        max_idle: float = ...,
+        reconnect_timeout: float = ...,
+        reconnect_failed: Optional[AsyncConnectFailedCB] = ...,
+        num_workers: int = ...,
+    ):
+        ...
+
+    @overload
+    def __init__(
+        self: "AsyncNullConnectionPool[ACT, TupleRow]",
         conninfo: str = "",
         *,
         open: bool = ...,
@@ -53,6 +76,30 @@ class AsyncNullConnectionPool(_BaseNullConnectionPool, AsyncConnectionPool[ACT])
         configure: Optional[Callable[[ACT], Awaitable[None]]] = ...,
         reset: Optional[Callable[[ACT], Awaitable[None]]] = ...,
         kwargs: Optional[Dict[str, Any]] = ...,
+        min_size: int = ...,
+        max_size: Optional[int] = ...,
+        name: Optional[str] = ...,
+        timeout: float = ...,
+        max_waiting: int = ...,
+        max_lifetime: float = ...,
+        max_idle: float = ...,
+        reconnect_timeout: float = ...,
+        reconnect_failed: Optional[AsyncConnectFailedCB] = ...,
+        num_workers: int = ...,
+    ):
+        ...
+
+    @overload
+    def __init__(
+        self: "AsyncNullConnectionPool[ACT, Row]",
+        conninfo: str = "",
+        *,
+        open: bool = ...,
+        connection_class: Type[ACT],
+        configure: Optional[Callable[[ACT], Awaitable[None]]] = ...,
+        reset: Optional[Callable[[ACT], Awaitable[None]]] = ...,
+        kwargs: Optional[Dict[str, Any]] = ...,
+        row_factory: RowFactory[Row],
         min_size: int = ...,
         max_size: Optional[int] = ...,
         name: Optional[str] = ...,
@@ -75,6 +122,7 @@ class AsyncNullConnectionPool(_BaseNullConnectionPool, AsyncConnectionPool[ACT])
         configure: Optional[Callable[[ACT], Awaitable[None]]] = None,
         reset: Optional[Callable[[ACT], Awaitable[None]]] = None,
         kwargs: Optional[Dict[str, Any]] = None,
+        row_factory: Optional[RowFactory[Row]] = None,
         # Note: default value changed to 0.
         min_size: int = 0,
         max_size: Optional[int] = None,
@@ -94,6 +142,8 @@ class AsyncNullConnectionPool(_BaseNullConnectionPool, AsyncConnectionPool[ACT])
             configure=configure,
             reset=reset,
             kwargs=kwargs,
+            # TODO: mypy bug? It says that the base class is expecting a RowFactory
+            row_factory=cast(RowFactory[Row], row_factory),
             min_size=min_size,
             max_size=max_size,
             name=name,
