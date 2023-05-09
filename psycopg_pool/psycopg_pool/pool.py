@@ -10,8 +10,8 @@ from abc import ABC, abstractmethod
 from time import monotonic
 from queue import Queue, Empty
 from types import TracebackType
-from typing import Any, Callable, Dict, Iterator, List
-from typing import Optional, Sequence, Type
+from typing import Any, Callable, cast, Dict, Generic, Iterator, List
+from typing import Optional, overload, Sequence, Type, TypeVar
 from typing_extensions import TypeAlias
 from weakref import ref
 from contextlib import contextmanager
@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from psycopg import errors as e
 from psycopg import Connection
 from psycopg.pq import TransactionStatus
+from psycopg.rows import TupleRow
 
 from .base import ConnectionAttempt, BasePool
 from .sched import Scheduler
@@ -29,16 +30,65 @@ logger = logging.getLogger("psycopg.pool")
 
 ConnectFailedCB: TypeAlias = Callable[["ConnectionPool"], None]
 
+CT = TypeVar("CT", bound="Connection[Any]")
 
-class ConnectionPool(BasePool[Connection[Any]]):
+
+class ConnectionPool(Generic[CT], BasePool):
+    _pool: Deque[CT]
+
+    @overload
+    def __init__(
+        self: "ConnectionPool[Connection[TupleRow]]",
+        conninfo: str = "",
+        *,
+        open: bool = ...,
+        configure: Optional[Callable[[CT], None]] = ...,
+        reset: Optional[Callable[[CT], None]] = ...,
+        kwargs: Optional[Dict[str, Any]] = ...,
+        min_size: int = ...,
+        max_size: Optional[int] = ...,
+        name: Optional[str] = ...,
+        timeout: float = ...,
+        max_waiting: int = ...,
+        max_lifetime: float = ...,
+        max_idle: float = ...,
+        reconnect_timeout: float = ...,
+        reconnect_failed: Optional[ConnectFailedCB] = ...,
+        num_workers: int = ...,
+    ):
+        ...
+
+    @overload
+    def __init__(
+        self: "ConnectionPool[CT]",
+        conninfo: str = "",
+        *,
+        open: bool = ...,
+        connection_class: Type[CT],
+        configure: Optional[Callable[[CT], None]] = ...,
+        reset: Optional[Callable[[CT], None]] = ...,
+        kwargs: Optional[Dict[str, Any]] = ...,
+        min_size: int = ...,
+        max_size: Optional[int] = ...,
+        name: Optional[str] = ...,
+        timeout: float = ...,
+        max_waiting: int = ...,
+        max_lifetime: float = ...,
+        max_idle: float = ...,
+        reconnect_timeout: float = ...,
+        reconnect_failed: Optional[ConnectFailedCB] = ...,
+        num_workers: int = ...,
+    ):
+        ...
+
     def __init__(
         self,
         conninfo: str = "",
         *,
         open: bool = True,
-        connection_class: Type[Connection[Any]] = Connection,
-        configure: Optional[Callable[[Connection[Any]], None]] = None,
-        reset: Optional[Callable[[Connection[Any]], None]] = None,
+        connection_class: Type[CT] = cast(Type[CT], Connection[TupleRow]),
+        configure: Optional[Callable[[CT], None]] = None,
+        reset: Optional[Callable[[CT], None]] = None,
         kwargs: Optional[Dict[str, Any]] = None,
         min_size: int = 4,
         max_size: Optional[int] = None,
@@ -59,7 +109,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
         self._reconnect_failed = reconnect_failed or (lambda pool: None)
 
         self._lock = threading.RLock()
-        self._waiting = Deque["WaitingClient"]()
+        self._waiting = Deque["WaitingClient[CT]"]()
 
         # to notify that the pool is full
         self._pool_full_event: Optional[threading.Event] = None
@@ -128,7 +178,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
         logger.info("pool %r is ready to use", self.name)
 
     @contextmanager
-    def connection(self, timeout: Optional[float] = None) -> Iterator[Connection[Any]]:
+    def connection(self, timeout: Optional[float] = None) -> Iterator[CT]:
         """Context manager to obtain a connection from the pool.
 
         Return the connection immediately if available, otherwise wait up to
@@ -150,7 +200,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
             self._stats[self._USAGE_MS] += int(1000.0 * (t1 - t0))
             self.putconn(conn)
 
-    def getconn(self, timeout: Optional[float] = None) -> Connection[Any]:
+    def getconn(self, timeout: Optional[float] = None) -> CT:
         """Obtain a connection from the pool.
 
         You should preferably use `connection()`. Use this function only if
@@ -171,7 +221,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
             if not conn:
                 # No connection available: put the client in the waiting queue
                 t0 = monotonic()
-                pos = WaitingClient()
+                pos: WaitingClient[CT] = WaitingClient()
                 self._waiting.append(pos)
                 self._stats[self._REQUESTS_QUEUED] += 1
 
@@ -199,11 +249,9 @@ class ConnectionPool(BasePool[Connection[Any]]):
         logger.info("connection given by %r", self.name)
         return conn
 
-    def _get_ready_connection(
-        self, timeout: Optional[float]
-    ) -> Optional[Connection[Any]]:
+    def _get_ready_connection(self, timeout: Optional[float]) -> Optional[CT]:
         """Return a connection, if the client deserves one."""
-        conn: Optional[Connection[Any]] = None
+        conn: Optional[CT] = None
         if self._pool:
             # Take a connection ready out of the pool
             conn = self._pool.popleft()
@@ -227,7 +275,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
         self._growing = True
         self.run_task(AddConnection(self, growing=True))
 
-    def putconn(self, conn: Connection[Any]) -> None:
+    def putconn(self, conn: CT) -> None:
         """Return a connection to the loving hands of its pool.
 
         Use this function only paired with a `getconn()`. You don't need to use
@@ -247,7 +295,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
         else:
             self._return_connection(conn)
 
-    def _maybe_close_connection(self, conn: Connection[Any]) -> bool:
+    def _maybe_close_connection(self, conn: CT) -> bool:
         """Close a returned connection if necessary.
 
         Return `!True if the connection was closed.
@@ -352,8 +400,8 @@ class ConnectionPool(BasePool[Connection[Any]]):
 
     def _stop_workers(
         self,
-        waiting_clients: Sequence["WaitingClient"] = (),
-        connections: Sequence[Connection[Any]] = (),
+        waiting_clients: Sequence["WaitingClient[CT]"] = (),
+        connections: Sequence[CT] = (),
         timeout: float = 0.0,
     ) -> None:
         # Stop the scheduler
@@ -388,7 +436,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
                         timeout,
                     )
 
-    def __enter__(self) -> "ConnectionPool":
+    def __enter__(self) -> "ConnectionPool[CT]":
         self.open()
         return self
 
@@ -500,7 +548,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
                     ex,
                 )
 
-    def _connect(self, timeout: Optional[float] = None) -> Connection[Any]:
+    def _connect(self, timeout: Optional[float] = None) -> CT:
         """Return a new connection configured for the pool."""
         self._stats[self._CONNECTIONS_NUM] += 1
         kwargs = self.kwargs
@@ -509,8 +557,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
             kwargs["connect_timeout"] = max(round(timeout), 1)
         t0 = monotonic()
         try:
-            conn: Connection[Any]
-            conn = self.connection_class.connect(self.conninfo, **kwargs)
+            conn = cast(CT, self.connection_class.connect(self.conninfo, **kwargs))
         except Exception:
             self._stats[self._CONNECTIONS_ERRORS] += 1
             raise
@@ -587,7 +634,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
                 else:
                     self._growing = False
 
-    def _return_connection(self, conn: Connection[Any]) -> None:
+    def _return_connection(self, conn: CT) -> None:
         """
         Return a connection to the pool after usage.
         """
@@ -608,7 +655,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
 
         self._add_to_pool(conn)
 
-    def _add_to_pool(self, conn: Connection[Any]) -> None:
+    def _add_to_pool(self, conn: CT) -> None:
         """
         Add a connection to the pool.
 
@@ -640,7 +687,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
                 if self._pool_full_event and len(self._pool) >= self._min_size:
                     self._pool_full_event.set()
 
-    def _reset_connection(self, conn: Connection[Any]) -> None:
+    def _reset_connection(self, conn: CT) -> None:
         """
         Bring a connection to IDLE state or close it.
         """
@@ -682,7 +729,7 @@ class ConnectionPool(BasePool[Connection[Any]]):
                 conn.close()
 
     def _shrink_pool(self) -> None:
-        to_close: Optional[Connection[Any]] = None
+        to_close: Optional[CT] = None
 
         with self._lock:
             # Reset the min number of connections used
@@ -712,13 +759,13 @@ class ConnectionPool(BasePool[Connection[Any]]):
         return rv
 
 
-class WaitingClient:
+class WaitingClient(Generic[CT]):
     """A position in a queue for a client waiting for a connection."""
 
     __slots__ = ("conn", "error", "_cond")
 
     def __init__(self) -> None:
-        self.conn: Optional[Connection[Any]] = None
+        self.conn: Optional[CT] = None
         self.error: Optional[BaseException] = None
 
         # The WaitingClient behaves in a way similar to an Event, but we need
@@ -728,7 +775,7 @@ class WaitingClient:
         # will be lost.
         self._cond = threading.Condition()
 
-    def wait(self, timeout: float) -> Connection[Any]:
+    def wait(self, timeout: float) -> CT:
         """Wait for a connection to be set and return it.
 
         Raise an exception if the wait times out or if fail() is called.
@@ -749,7 +796,7 @@ class WaitingClient:
             assert self.error
             raise self.error
 
-    def set(self, conn: Connection[Any]) -> bool:
+    def set(self, conn: CT) -> bool:
         """Signal the client waiting that a connection is ready.
 
         Return True if the client has "accepted" the connection, False
@@ -781,7 +828,7 @@ class WaitingClient:
 class MaintenanceTask(ABC):
     """A task to run asynchronously to maintain the pool state."""
 
-    def __init__(self, pool: "ConnectionPool"):
+    def __init__(self, pool: "ConnectionPool[Any]"):
         self.pool = ref(pool)
 
     def __repr__(self) -> str:
@@ -819,21 +866,21 @@ class MaintenanceTask(ABC):
         pool.run_task(self)
 
     @abstractmethod
-    def _run(self, pool: "ConnectionPool") -> None:
+    def _run(self, pool: "ConnectionPool[Any]") -> None:
         ...
 
 
 class StopWorker(MaintenanceTask):
     """Signal the maintenance thread to terminate."""
 
-    def _run(self, pool: "ConnectionPool") -> None:
+    def _run(self, pool: "ConnectionPool[Any]") -> None:
         pass
 
 
 class AddConnection(MaintenanceTask):
     def __init__(
         self,
-        pool: "ConnectionPool",
+        pool: "ConnectionPool[Any]",
         attempt: Optional["ConnectionAttempt"] = None,
         growing: bool = False,
     ):
@@ -841,18 +888,18 @@ class AddConnection(MaintenanceTask):
         self.attempt = attempt
         self.growing = growing
 
-    def _run(self, pool: "ConnectionPool") -> None:
+    def _run(self, pool: "ConnectionPool[Any]") -> None:
         pool._add_connection(self.attempt, growing=self.growing)
 
 
 class ReturnConnection(MaintenanceTask):
     """Clean up and return a connection to the pool."""
 
-    def __init__(self, pool: "ConnectionPool", conn: "Connection[Any]"):
+    def __init__(self, pool: "ConnectionPool[Any]", conn: CT):
         super().__init__(pool)
         self.conn = conn
 
-    def _run(self, pool: "ConnectionPool") -> None:
+    def _run(self, pool: "ConnectionPool[Any]") -> None:
         pool._return_connection(self.conn)
 
 
@@ -863,7 +910,7 @@ class ShrinkPool(MaintenanceTask):
     in the pool.
     """
 
-    def _run(self, pool: "ConnectionPool") -> None:
+    def _run(self, pool: "ConnectionPool[Any]") -> None:
         # Reschedule the task now so that in case of any error we don't lose
         # the periodic run.
         pool.schedule_task(self, pool.max_idle)
