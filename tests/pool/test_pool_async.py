@@ -7,7 +7,7 @@ import pytest
 
 import psycopg
 from psycopg.pq import TransactionStatus
-from psycopg.rows import class_row, TupleRow
+from psycopg.rows import class_row, Row, TupleRow
 from psycopg._compat import assert_type, create_task, Counter
 
 try:
@@ -68,8 +68,9 @@ async def test_row_factory(dsn):
 
     async with pool.AsyncConnectionPool(
         dsn, row_factory=class_row(MyRow), configure=set_autocommit
-    ) as p1, p1.connection() as conn1:
-        (row1,) = await (await conn1.execute("select 1 as x")).fetchall()
+    ) as p1:
+        async with p1.connection() as conn1:
+            (row1,) = await (await conn1.execute("select 1 as x")).fetchall()
     assert_type(p1, pool.AsyncConnectionPool[psycopg.AsyncConnection[MyRow], MyRow])
     assert_type(conn1, psycopg.AsyncConnection[MyRow])
     assert_type(row1, MyRow)
@@ -89,6 +90,63 @@ async def test_row_factory(dsn):
         pool.AsyncConnectionPool(
             dsn, kwargs={"row_factory": object}, row_factory=class_row(dict)
         )
+
+
+async def test_generic_connection_type(dsn):
+    async def set_autocommit(conn: psycopg.AsyncConnection[Any]) -> None:
+        await conn.set_autocommit(True)
+
+    class MyConnection(psycopg.AsyncConnection[Row]):
+        pass
+
+    async with pool.AsyncConnectionPool(
+        dsn,
+        connection_class=MyConnection[MyRow],
+        row_factory=class_row(MyRow),
+        configure=set_autocommit,
+    ) as p1, p1.connection() as conn1:
+        (row1,) = await (await conn1.execute("select 1 as x")).fetchall()
+    assert_type(p1, pool.AsyncConnectionPool[MyConnection[MyRow], MyRow])
+    assert_type(conn1, MyConnection[MyRow])
+    assert_type(row1, MyRow)
+    assert conn1.autocommit
+    assert row1 == {"x": 1}
+
+    async with pool.AsyncConnectionPool(
+        dsn, connection_class=MyConnection[TupleRow]
+    ) as p2:
+        async with p2.connection() as conn2:
+            (row2,) = await (await conn2.execute("select 2 as y")).fetchall()
+    assert_type(p2, pool.AsyncConnectionPool[MyConnection[TupleRow], TupleRow])
+    assert_type(conn2, MyConnection[TupleRow])
+    assert_type(row2, TupleRow)
+    assert row2 == (2,)
+
+
+async def test_non_generic_connection_type(dsn):
+    async def set_autocommit(conn: psycopg.AsyncConnection[Any]) -> None:
+        await conn.set_autocommit(True)
+
+    class MyConnection(psycopg.AsyncConnection[MyRow]):
+        def __init__(self, *args: Any, **kwargs: Any):
+            kwargs["row_factory"] = class_row(MyRow)
+            super().__init__(*args, **kwargs)
+
+    async with pool.AsyncConnectionPool(
+        dsn,
+        connection_class=MyConnection,
+        # TODO: almost good! this is redundant, but necessary in order to annotate
+        # the connection to return MyRow.
+        row_factory=class_row(MyRow),
+        configure=set_autocommit,
+    ) as p1:
+        async with p1.connection() as conn1:
+            (row1,) = await (await conn1.execute("select 1 as x")).fetchall()
+    assert_type(p1, pool.AsyncConnectionPool[MyConnection, MyRow])
+    assert_type(conn1, MyConnection)
+    assert_type(row1, MyRow)
+    assert conn1.autocommit
+    assert row1 == {"x": 1}
 
 
 @pytest.mark.crdb_skip("backend pid")
